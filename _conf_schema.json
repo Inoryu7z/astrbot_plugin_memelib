@@ -1,0 +1,30 @@
+{
+  "injection_level": {
+    "description": "注入等级",
+    "type": "string",
+    "default": "初级（酌情使用）",
+    "options": ["初级（酌情使用）", "完整注入"],
+    "hint": "两档注入的梗库内容完全相同，区别只在引导语：初级档引导模型酌情使用，防止压过原人设；完整档直接给出梗库，不设克制。"
+  },
+  "lite_intro": {
+    "description": "初级档引导语",
+    "type": "string",
+    "default": "以下网络流行梗供参考，请酌情使用。",
+    "hint": "初级档下，梗库正文前的一句话。保留“酌情”的含义即可，建议一句话，不要写长指令。"
+  },
+  "full_intro": {
+    "description": "完整档引导语",
+    "type": "string",
+    "default": "梗库如下：",
+    "hint": "完整档下，梗库正文前的一句话，直接引出梗库即可。"
+  },
+  "custom_meme_lib": {
+    "description": "自定义梗库（JSON）",
+    "type": "text",
+    "editor_mode": true,
+    "editor_language": "json",
+    "editor_theme": "vs-dark",
+    "default": "",
+    "hint": "留空时使用插件内置 memes.json。填写后整体替换内置库，格式为 JSON 数组，每条含 name（原写法）、aliases（变体数组，可空）、meaning（含义与使用情境）、example（自然例句），不要包含 URL。格式错误时自动回退内置库。"
+  }
+}

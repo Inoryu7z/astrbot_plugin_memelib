@@ -1,0 +1,6 @@
+name: astrbot_plugin_memelib
+display_name: 潮流梗库
+author: Keiyon
+description: 把精选网络流行梗注入系统提示词，补充 LLM 的世界知识。支持初级（酌情）/完整两档注入，支持配置面板自定义梗库与引导语。
+version: 0.1.0
+repo: local
