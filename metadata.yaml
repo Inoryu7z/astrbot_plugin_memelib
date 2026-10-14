@@ -1,6 +1,6 @@
 name: astrbot_plugin_memelib
-display_name: 潮流梗库
-author: Keiyon
-description: 把精选网络流行梗注入系统提示词，补充 LLM 的世界知识。支持初级（酌情）/完整两档注入，支持配置面板自定义梗库与引导语。
+display_name: 重生之我是梗小鬼
 version: 0.1.0
-repo: local
+description: 为 Bot 注入当下中文互联网的精选流行梗知识，先保证听得懂，再在契合的语境自然使用。支持两档注入力度与自定义梗库。
+author: Inoryu7z
+repo: https://github.com/Inoryu7z/astrbot_plugin_memelib

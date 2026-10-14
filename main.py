@@ -1,140 +1,130 @@
-import json
+import hashlib
 import os
+import re
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
+from astrbot.core.provider.entities import ProviderRequest
+
+from .meme_store import BuiltinMemeStore, parse_lib, render_memes
 
 BUILTIN_LIB_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "memes.json"
+    os.path.dirname(os.path.abspath(__file__)), "memes.txt"
 )
 
-# 注入块的固定节标题，同时作为防重复注入的哨兵
-SECTION_TITLE = "【流行梗库】"
+# 注入块用成对标签包裹，便于在 system_prompt 被复用时幂等清理
+INJECTION_HEADER = "<MemeLib>"
+INJECTION_FOOTER = "</MemeLib>"
+_INJECTION_PATTERN = re.compile(
+    re.escape(INJECTION_HEADER) + r".*?" + re.escape(INJECTION_FOOTER),
+    flags=re.DOTALL,
+)
 
 LEVEL_LITE = "初级（酌情使用）"
 LEVEL_FULL = "完整注入"
 
-DEFAULT_LITE_INTRO = "以下网络流行梗供参考，请酌情使用。"
-DEFAULT_FULL_INTRO = "梗库如下："
+# 两档引导语均为用户定稿：共同把梗库定位为听懂材料并要求保持原人设；
+# 初级档额外限制主动使用的频率与动机
+DEFAULT_LITE_INTRO = (
+    "以下梗库用于让你听懂对话中出现的流行梗。"
+    "回复时保持你原有的说话方式与人设，"
+    "只在语境自然契合时酌情使用，禁止滥用，禁止为了用梗而强行套用。"
+)
+DEFAULT_FULL_INTRO = (
+    "以下梗库用于让你听懂对话中出现的流行梗。"
+    "回复时保持你原有的说话方式与人设。"
+)
+
+
+def _remove_meme_injection(system_prompt: str | None) -> tuple[str, bool]:
+    """移除已有的梗库注入块；返回（清理后的文本, 是否发生了清理）。"""
+    if not system_prompt:
+        return system_prompt or "", False
+    cleaned = _INJECTION_PATTERN.sub("", system_prompt)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, cleaned != system_prompt
 
 
 class MemePromptLib(Star):
-    """潮流梗库：把精选网络流行梗注入系统提示词，补充 LLM 的世界知识。
+    """潮流梗库：每次 LLM 请求前把精选流行梗全量注入系统提示词。
 
-    - lite 档：全量注入梗库，引导语含"酌情"，防止人设被压成梗小鬼。
-    - full 档：全量注入梗库，引导语不设克制。
-    两档注入的梗库内容相同，仅引导语不同。
+    - 初级档：梗库内容相同，引导语要求保持人设、酌情使用、禁止滥用。
+    - 完整档：要求听懂并保持人设，不限制主动使用。
+    注入方式与 dayflow 插件一致：成对标签包裹，每次请求先清除旧块再
+    追加新块，保证 system_prompt 被跨请求复用时仍然幂等。
+    内置 memes.txt 只加载一次；自定义梗库按内容哈希缓存渲染结果，
+    解析失败时回退内置库。
     """
 
     def __init__(self, context: Context, config=None):
         super().__init__(context)
         self.config = config or {}
+        self._builtin = BuiltinMemeStore(BUILTIN_LIB_PATH)
+        # (内容哈希, 渲染结果)；渲染失败时结果缓存为 None，避免刷日志
+        self._custom_cache: tuple[str, str | None] | None = None
 
-    # ---------- 梗库加载 ----------
+    def _render_custom(self, raw: str) -> str | None:
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
+        if self._custom_cache and self._custom_cache[0] == digest:
+            return self._custom_cache[1]
 
-    def _load_builtin(self) -> list:
         try:
-            with open(BUILTIN_LIB_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except FileNotFoundError:
-            return []
-        except Exception:
-            logger.exception("潮流梗库：内置 memes.json 解析失败，本次不注入")
-            return []
-        if not isinstance(data, list):
-            logger.warning("潮流梗库：内置 memes.json 顶层不是数组，本次不注入")
-            return []
-        return data
-
-    @staticmethod
-    def _parse_custom(raw) -> list | None:
-        """解析配置面板里的自定义梗库。空配置返回 None（回退内置库）。"""
-        if not raw or not str(raw).strip():
+            memes = parse_lib(raw)
+        except ValueError as e:
+            logger.warning(f"潮流梗库：自定义梗库解析失败（{e}），回退内置库")
+            self._custom_cache = (digest, None)
             return None
-        text = str(raw).strip()
-        # 容错：用户可能粘了 ```json ... ``` 包裹的内容
-        if text.startswith("```"):
-            lines = text.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].strip().startswith("```"):
-                lines = lines[:-1]
-            text = "\n".join(lines).strip()
-        data = json.loads(text)
-        if not isinstance(data, list):
-            raise ValueError("自定义梗库顶层必须是 JSON 数组")
-        return data
 
-    # ---------- 渲染 ----------
+        rendered = render_memes(memes)
+        self._custom_cache = (digest, rendered)
+        logger.info(f"潮流梗库：已启用自定义梗库，共 {len(memes)} 条")
+        return rendered
 
-    @staticmethod
-    def _render(entries: list) -> str:
-        lines = []
-        index = 0
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            name = str(entry.get("name", "")).strip()
-            if not name:
-                continue
-            meaning = str(entry.get("meaning", "")).strip()
-            example = str(entry.get("example", "")).strip()
+    def _get_lib_body(self) -> str:
+        raw = str(self.config.get("custom_meme_lib", "") or "").strip()
+        if raw:
+            body = self._render_custom(raw)
+            if body:
+                return body
+        return self._builtin.rendered
 
-            aliases = entry.get("aliases") or []
-            if isinstance(aliases, str):
-                aliases = [aliases] if aliases.strip() else []
-            aliases = [str(a).strip() for a in aliases if str(a).strip()]
-
-            index += 1
-            line = f"{index}. {name}"
-            if aliases:
-                line += "（又称：" + "、".join(aliases) + "）"
-            if meaning:
-                line += "：" + meaning
-            if example:
-                line += f" 例：{example}"
-            lines.append(line)
-        return "\n".join(lines)
-
-    # ---------- 注入 ----------
+    def _get_intro(self) -> str:
+        if self.config.get("injection_level", LEVEL_LITE) == LEVEL_FULL:
+            return (
+                str(self.config.get("full_intro", "") or "").strip()
+                or DEFAULT_FULL_INTRO
+            )
+        return (
+            str(self.config.get("lite_intro", "") or "").strip()
+            or DEFAULT_LITE_INTRO
+        )
 
     @filter.on_llm_request()
     async def inject_meme_lib(
         self, event: AstrMessageEvent, req: ProviderRequest
     ) -> None:
         try:
-            if SECTION_TITLE in (req.system_prompt or ""):
+            if getattr(req, "system_prompt", None) is None:
+                req.system_prompt = ""
+
+            # 先清除上次注入，避免 system_prompt 被跨请求复用导致堆叠/残留
+            req.system_prompt, removed = _remove_meme_injection(
+                req.system_prompt
+            )
+            if removed:
+                logger.debug("潮流梗库：已清理上次注入块")
+
+            body = self._get_lib_body()
+            if not body:
                 return
 
-            try:
-                entries = self._parse_custom(
-                    self.config.get("custom_meme_lib", "")
-                )
-            except Exception as e:
-                logger.warning(
-                    f"潮流梗库：自定义梗库解析失败（{e}），回退内置 memes.json"
-                )
-                entries = None
-
-            if entries is None:
-                entries = self._load_builtin()
-            if not entries:
-                return
-
-            if self.config.get("injection_level", LEVEL_LITE) == LEVEL_FULL:
-                intro = self.config.get("full_intro", "") or DEFAULT_FULL_INTRO
-            else:
-                intro = self.config.get("lite_intro", "") or DEFAULT_LITE_INTRO
-
-            rendered = self._render(entries)
-            if not rendered:
-                return
-
+            block = (
+                f"{INJECTION_HEADER}\n{self._get_intro()}\n{body}\n"
+                f"{INJECTION_FOOTER}"
+            )
             req.system_prompt = (
-                (req.system_prompt or "")
-                + f"\n\n{SECTION_TITLE}\n{intro}\n{rendered}"
+                f"{req.system_prompt}\n\n{block}" if req.system_prompt else block
             )
         except Exception:
             logger.exception("潮流梗库：注入过程发生异常，已跳过")
