@@ -104,11 +104,13 @@ def _parse_line(line: str) -> Meme | None:
     )
 
 
-def parse_lib(raw: str) -> list[Meme]:
+def parse_lib(raw: str, *, strict: bool = True) -> list[Meme]:
     """解析梗库文本。行文本或 JSON 数组均可。
 
-    任何一条缺名称或缺含义都视为格式错误，抛出 ValueError，
-    由调用方决定回退策略，避免半成品梗库静默注入。
+    strict=True（内置库用）：任何一条缺名称或缺含义都抛 ValueError，避免
+    半成品梗库静默注入。
+    strict=False（自定义库用）：跳过格式不合法的行并记日志，其余照常生效；
+    一条都没解析出来时才抛错，由调用方回退内置库。
     """
     text = _strip_fence(raw or "")
     if not text:
@@ -131,14 +133,26 @@ def parse_lib(raw: str) -> list[Meme]:
             memes.append(meme)
         if bad_lines:
             preview = "、".join(str(n) for n in bad_lines[:5])
-            raise ValueError(
+            message = (
                 f"第 {preview} 行缺少梗名或「含义」字段，规范格式："
                 "梗名｜含义：…｜用法：…"
             )
+            if strict:
+                raise ValueError(message)
+            logger.warning(f"潮流梗库：已跳过 {message}")
         if not memes:
             raise ValueError("没有解析出任何有效条目")
 
     return memes
+
+
+def merge_libs(base: list[Meme], extra: list[Meme]) -> list[Meme]:
+    """把 extra 原样拼接到 base 之后，不做去重。
+
+    追加模式的语义就是追加：内置库在前，用户条目在后，同名条目不替换、
+    不合并，由注入顺序靠后的那一条在后文说明中覆盖。
+    """
+    return [*base, *extra]
 
 
 def render_memes(memes: list[Meme]) -> str:
@@ -162,6 +176,7 @@ class BuiltinMemeStore:
 
     def __init__(self, path: str):
         self._path = path
+        self._memes: list[Meme] = []
         self._rendered = ""
         self._count = 0
         self._load()
@@ -182,9 +197,14 @@ class BuiltinMemeStore:
         except ValueError:
             logger.exception("潮流梗库：内置 memes.txt 格式错误，不注入梗库")
             return
+        self._memes = memes
         self._count = len(memes)
         self._rendered = render_memes(memes)
         logger.info(f"潮流梗库：内置梗库已加载，共 {self._count} 条")
+
+    @property
+    def memes(self) -> list[Meme]:
+        return self._memes
 
     @property
     def rendered(self) -> str:
